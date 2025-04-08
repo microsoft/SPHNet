@@ -1,0 +1,13 @@
+order : 6         # the maximum order in the model. when the basis is def2-tzvp, this should be 6; when the basis is def2-svp, this should be 4.
+embedding_dimension: 128
+bottle_hidden_size: 32    
+max_radius: 15
+num_nodes: 20     # this should be larger than the number of atomic types in the dataset.
+radius_embed_dim: 16
+use_equi_norm: True
+
+# para that only used by lsm-qhnet
+short_cutoff_upper: 5
+long_cutoff_upper: 15
+num_scale_atom_layers: 4
+num_long_range_layers: 4

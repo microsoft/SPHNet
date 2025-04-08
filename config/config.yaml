@@ -1,0 +1,84 @@
+defaults: # which model/schedule config file to use
+- model: sphnet
+# - model: qhnet
+- schedule: polynomial 
+- _self_
+
+job_id: test_pubchem # The checkpoint/log file is saved in ckpt_path/job_id
+ckpt_path: /data/ckpt
+seed: 123
+log_dir: "/data/ckpt"
+debug: false
+
+wandb: # wandb configuration
+  open: False
+  wandb_api_key: c77ec9804aaffba9a04e3b7b4dd389b53210ab39
+  wandb_project: MADFT-NN
+  wandb_group: ""
+  wandb_notes: ""
+
+#########
+# trainer related config
+model_backbone: SPHNet
+# model_backbone: QHNet_backbone
+
+hami_model:
+  # name: HamiHead_qhnet
+  name: HamiHead_sphnet
+  irreps_edge_embedding: null
+  num_layer: 2
+  max_radius_cutoff: 30  # hami head cut off, default full connected
+  radius_embed_dim: 16
+  bottle_hidden_size: 32
+
+use_sparse_tp: true # whether use the sparse tensor product gate
+sparsity: 0.7 #Sparsity ratio
+num_epochs: 3000000 #Maximum number of epochs
+max_steps: 200000 #Maximum number of training steps.
+batch_size: 1
+inference_batch_size: 1
+dataloader_num_workers: 4
+lr: 1e-3
+multi_para_group: false
+weight_decay: 0
+enable_hami: true
+enable_energy_hami_error: false # whether to calculate the occupiedenergy MAE and C similarity during validation. This is very slow.
+hami_train_loss: 'maemse'
+hami_val_loss: 'mae'
+ngpus: 1
+num_nodes: 1
+precision: 32 # the precison for training, can use 16 for mixed precision
+gradient_clip_val: 5.0
+early_stopping_patience: 300000
+val_check_interval: null #follow pytorch lightning
+test_interval: 10 #Test interval, one test per n epochs (default: 10) # NOT used
+save_interval: 1 #Save interval, one save per n epochs (default: 10)
+############
+# data realted config
+data_name: pubchem  #the target dataset
+basis: "def2-tzvp"  #when predict hamitonian, the basis need to be set
+dataset_path : "/data/pubchem_20230831_processed"
+# dataset_path : "/data/pubchem_sub"
+
+# data_name: qh9_stable_iid # four kinds of data splits: qh9_stable_iid, qh9_stable_ood, qh9_dynamic_mol, qh9_dynamic_geo
+# basis: "def2-svp"
+# dataset_path : "/data/qh9stable/data.mdb"
+# # dataset_path : "/data/qh9dynamic/data.mdb"
+
+# data_name: md17
+# basis: "def2-svp"
+# dataset_path : "/data/md17/ethanol/data.mdb"
+
+dataset_size : 17146 #the dataset size is used. This will decide the steps of different phases"
+train_ratio: 0.05
+val_ratio: 0.1
+test_ratio: 0.85
+used_cache: false
+ema_decay: 1 # 1 means trun off ema and (0,1) is turning on.
+unit: 627.503 # 627.503 if the unit in the dataset is kcal/mol, else set 1; the unit used in this model is hatree
+############
+# model related config
+activation: "silu"
+remove_init: true # fock - init if remove_init else fock
+remove_atomref_energy: true # when true, energy = energy - eachtype_atom_count*atom_ref
+num_sanity_val_steps: 0
