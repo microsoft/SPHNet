@@ -1,13 +1,12 @@
 defaults: # which model/schedule config file to use
 - model: sphnet
-# - model: qhnet
 - schedule: polynomial 
 - _self_
 
-job_id: test_pubchem # The checkpoint/log file is saved in ckpt_path/job_id
-ckpt_path: /data/ckpt
+job_id: test # The checkpoint/log file is saved in ckpt_path/job_id
+ckpt_path: outputs
 seed: 123
-log_dir: "/data/ckpt"
+log_dir: "outputs"
 debug: false
 
 wandb: # wandb configuration
@@ -20,10 +19,8 @@ wandb: # wandb configuration
 #########
 # trainer related config
 model_backbone: SPHNet
-# model_backbone: QHNet_backbone
 
 hami_model:
-  # name: HamiHead_qhnet
   name: HamiHead_sphnet
   irreps_edge_embedding: null
   num_layer: 2
@@ -55,27 +52,30 @@ test_interval: 10 #Test interval, one test per n epochs (default: 10) # NOT used
 save_interval: 1 #Save interval, one save per n epochs (default: 10)
 ############
 # data realted config
-data_name: pubchem  #the target dataset
-basis: "def2-tzvp"  #when predict hamitonian, the basis need to be set
-dataset_path : "/data/pubchem_20230831_processed"
-# dataset_path : "/data/pubchem_sub"
+# data_name: pubchem  #the target dataset
+# basis: "def2-tzvp"  #when predict hamitonian, the basis need to be set
+# dataset_path : "/data/pubchem/"  # if the dataset is lmdb format, enter the folder path
 
 # data_name: qh9_stable_iid # four kinds of data splits: qh9_stable_iid, qh9_stable_ood, qh9_dynamic_mol, qh9_dynamic_geo
 # basis: "def2-svp"
-# dataset_path : "/data/qh9stable/data.mdb"
+# dataset_path : "/data/qh9stable/data.mdb"     # if the dataset is mdb format, enter the file path
 # # dataset_path : "/data/qh9dynamic/data.mdb"
 
 # data_name: md17
 # basis: "def2-svp"
 # dataset_path : "/data/md17/ethanol/data.mdb"
 
-dataset_size : 17146 #the dataset size is used. This will decide the steps of different phases"
-train_ratio: 0.05
+data_name: custom
+basis: "def2-svp"
+dataset_path : "example_data/data.mdb"
+
+dataset_size : 1000 #the dataset size is used. This will decide the steps of different phases"
+train_ratio: 0.8
 val_ratio: 0.1
-test_ratio: 0.85
+test_ratio: 0.1
 used_cache: false
 ema_decay: 1 # 1 means trun off ema and (0,1) is turning on.
-unit: 627.503 # 627.503 if the unit in the dataset is kcal/mol, else set 1; the unit used in this model is hatree
+unit: 1 # 627.503 if the unit in the dataset is kcal/mol, else set 1; the unit used in this model is hatree
 ############
 # model related config
 activation: "silu"

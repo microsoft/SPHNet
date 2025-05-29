@@ -10,7 +10,6 @@ from pytorch_lightning.utilities import rank_zero_warn
 import warnings
 import traceback
 import os
-from .QHNet import QHNet_backbone,HamiHead_QHNet
 from .SPHNet import SPHNet,Pair_construction_layer
 
 from .lsrm.lsrm_modules import Visnorm_shared_LSRMNorm2_2branchSerial
@@ -35,19 +34,11 @@ def create_model(config, prior_model=None, mean=None, std=None):
     outputmodel_name = config["output_model"]
     
     cut_off = config["cutoff_upper"]
-    if model_backbone_name=="QHNet_backbone":
-        if enable_symmetry==True:
-            raise(ValueError("sorry, the QHNet_backbone does not support symmetry."))
-    if model_backbone_name=="QHNet_backbone_symmetry":
-        if enable_symmetry==False:
-            raise(ValueError("sorry, the QHNet_backbone_symmetry does not support no-symmetry."))
-
     model_backbone_cfg['use_sparse_tp']=config['use_sparse_tp']
     
     model_type = None
     if model_backbone_name.startswith(
-        ("QHNet_backbone", 
-        "SPHNet")
+        ("SPHNet")
          ):
         model_type = "TP"
         representation_model = eval(model_backbone_name)(**model_backbone_cfg)
@@ -67,26 +58,17 @@ def create_model(config, prior_model=None, mean=None, std=None):
                         "radius_embed_dim": config["hami_model"]['radius_embed_dim'],
                         "bottle_hidden_size": config["hami_model"]['bottle_hidden_size'],
                         "ckpt_path": os.path.join(config['ckpt_path'],config['job_id'])}
-        if config["hami_model"]["name"]:
-            if "qhnet" in config["hami_model"]["name"]:
-                head_name = 'HamiHead_QHNet'
-            else:
-                head_name = 'Pair_construction_layer'
-            hami_func = eval(head_name)
-            if config["hami_model"]["irreps_edge_embedding"]:
-                hami_config.update({"irreps_edge_embedding":config["hami_model"]["irreps_edge_embedding"]
-                        })
-            else:
-                hami_config.update({"irreps_edge_embedding":
-                    construct_o3irrps_base(bottle_hidden_size,order)})
-            hami_config.update({"sparsity":config["sparsity"]})
-            
+
+        head_name = 'Pair_construction_layer'
+        hami_func = eval(head_name)
+        if config["hami_model"]["irreps_edge_embedding"]:
+            hami_config.update({"irreps_edge_embedding":config["hami_model"]["irreps_edge_embedding"]
+                    })
         else:
-            hami_func = HamiHead_QHNet \
-                if "qhnet" in model_backbone_name \
-                else Pair_construction_layer
             hami_config.update({"irreps_edge_embedding":
                 construct_o3irrps_base(bottle_hidden_size,order)})
+        hami_config.update({"sparsity":config["sparsity"]})
+
         hami_config['steps_1epoch']=int(config['dataset_size']*config['train_ratio']/config['batch_size'])
         hami_model = hami_func(**hami_config)
         

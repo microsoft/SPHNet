@@ -42,7 +42,7 @@ class Config(BaseSchema):
     wandb: Dict[str, Any] = MISSING
     #########
     # trainer related config
-    model_backbone:str = "QHNet_backbone"
+    model_backbone:str = "SPHNet"
     output_model: str = "EquivariantScalar_viaTP"
     hami_model: Dict[str, Any] = MISSING
     use_sparse_tp: bool = False

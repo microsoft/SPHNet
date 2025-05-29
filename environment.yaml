@@ -24,7 +24,7 @@ dependencies:
   - pytorch::pytorch-cuda=12.1
   - pytorch-lightning
   - tensorboardx
-  # QHNet
+  # SPHNet
   - e3nn
   - hydra-core
   - rdkit
@@ -47,7 +47,7 @@ dependencies:
     - syrupy
     - ray
     - orjson
-    # QHNet
+    # SPHNet
     - ase
     - pyg-lib
     - --find-links https://data.pyg.org/whl/torch-2.1.0+cu121.html

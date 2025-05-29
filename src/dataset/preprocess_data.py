@@ -1,3 +1,10 @@
+'''
+This file is an example script about how to make your dataset suitable for SPHNet model.
+This script will finally output a mdb format file.
+You can modify the data reading part according to your data format.
+'''
+
+
 from tqdm import tqdm
 import torch
 import os
@@ -6,15 +13,13 @@ import pickle
 from torch_geometric.data import Data
 from torch_geometric.transforms.radius_graph import RadiusGraph
 
-import sys
 from build_label import build_label
 
+import sys
 sys.path.append('..')
 import numpy as np
 from utility.pyscf import get_pyscf_obj_from_dataset
 from argparse import Namespace
-import shutup
-shutup.please()
 
 chemical_symbols = ["n", "H", "He" ,"Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S", 
             "Cl", "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga",
@@ -56,6 +61,11 @@ convention_dict = {
     ),
 }
 
+'''
+The order of orbital in the Hamiltonian matrix calculated by different methods are different. 
+This function is to transform the orbital order.
+The supported transform pairs are list in above convention_dict.
+'''
 def matrix_transform(hamiltonian, atoms, convention='pyscf_def2svp'):
     conv = convention_dict[convention]
     orbitals = ''
@@ -92,6 +102,9 @@ def cord2xyz(atom_types, atom_cords):
         xyz += f"{atom_types[i]} {' '.join([str(j) for j in atom_cords[i]])}\n"
     return xyz
 
+'''
+This function calculate the initial guess of Hamiltonian matrix. This should be very quick.
+'''
 def cal_initH(Z, R):
 
     pos = R
@@ -104,11 +117,10 @@ def cal_initH(Z, R):
     return init_h
 
 def create_lmdb(file_path, data):  
-    # 创建 LMDB 环境
+    # create LMDB environment
     env = lmdb.open(file_path, map_size=80 * 1024 * 1024 * 1024)  
   
-    with env.begin(write=True) as txn:  
-        # 存储数据库长度  
+    with env.begin(write=True) as txn:   
         txn.put("length".encode("ascii"), pickle.dumps(len(data)))  
   
         for idx, data_dict in enumerate(data):  
@@ -118,6 +130,7 @@ def create_lmdb(file_path, data):
   
     env.close()  
 
+# load dataset
 name = 'malondialdehyde'
 dataset = torch.load(f'/data/datasets/md17/{name}/processed/data.pt')
 
@@ -138,9 +151,11 @@ total_mol = dataset[0].energy.shape[0]
 atoms_num = len(atoms)
 focks = dataset[0].hamiltonian.reshape(total_mol, dataset[0].hamiltonian.shape[-1], dataset[0].hamiltonian.shape[-1])
 for i in tqdm(range(total_mol)):
+    # calculate the initial guess and transform the Hamiltonian matrix
     init_h = cal_initH(atoms,dataset[0].pos[i*atoms_num:(i+1)*atoms_num])
     trans_H = matrix_transform(focks[i], atoms, convention='back2pyscf')
 
+    # calculate the short range and long range edge index
     data_lsr = Data()
     data_lsr.num_nodes = atoms_num
     data_lsr.pos = dataset[0].pos[i*atoms_num:(i+1)*atoms_num]
@@ -149,6 +164,7 @@ for i in tqdm(range(total_mol)):
     min_nodes_foreachGroup = 3
     build_label(data_lsr, num_labels = int(atoms_num/min_nodes_foreachGroup),method = 'kmeans')
 
+    # save the molecula; pos, Ham, Ham_init need to be float64
     data_dict = {  
         "id":i,
         "pos": np.array(dataset[0].pos[i*atoms_num:(i+1)*atoms_num]), 

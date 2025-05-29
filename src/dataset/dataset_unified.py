@@ -1,5 +1,3 @@
-from ..dataset.sqlite_database.hamiltonian_database_qhnet import HamiltonianDatabase_qhnet
-
 import lmdb
 import numpy as np
 import torch
@@ -34,7 +32,6 @@ from argparse import Namespace
 import pickle
 
 from tqdm import tqdm
-from apsw import Connection
 import torch.nn.functional as F
 # from torch_geometric.utils import scatter
 # from torch_geometric.data import (InMemoryDataset, download_url, extract_zip, Data)
@@ -155,8 +152,8 @@ class MdbDataset(Dataset):
                 np.frombuffer(data_dict['Ham'], np.float64)
             pos = pos.reshape(num_nodes, 3)
             num_orbitals = sum([5 if atom <= 2 else 14 for atom in atoms])
+            Ham_init = np.frombuffer(data_dict['Ham_init'], np.float64)
             if self.remove_init:
-                Ham_init = np.frombuffer(data_dict['Ham_init'], np.float64)
                 Ham = (Ham-Ham_init).reshape(num_orbitals, num_orbitals)
             else:
                 Ham = Ham.reshape(num_orbitals, num_orbitals)
@@ -179,6 +176,7 @@ class MdbDataset(Dataset):
                 "atomic_numbers": atoms,           
                 'molecule_size':len(pos),
                 "fock": Ham.astype(np.float32),
+                "fock_init": Ham_init.astype(np.float32),
                 "buildblock_mask":self.mask,
                 "max_block_size":self.conv.max_block_size,
                 "labels":data.labels.numpy(),

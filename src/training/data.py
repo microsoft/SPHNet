@@ -42,8 +42,6 @@ class DataModule(LightningDataModule):
         worker_rank = self.trainer.global_rank if is_distributed else 0
 
         if stage == "fit" or stage is None or self.train_dataset is None:
-            # if "qh9" in self.data_name.lower():
-            #     dataset = HamiltonianDataset_qhnet_clean(self.path,remove_init=self.config["remove_init"])
             if "qh9" in self.data_name.lower() or "md17" in self.data_name.lower() or "custom" in self.data_name.lower():
                 dataset = MdbDataset(path = self.path,remove_init=self.config["remove_init"])
                 print("len dataset ",len(dataset))
@@ -58,26 +56,26 @@ class DataModule(LightningDataModule):
 
             if "qh9" in self.data_name.lower() and "stable_iid" in self.data_name.lower():
                 print("qh9 stable iid split")
-                index = torch.load('index/processed_QH9Stable_random_12.pt')
+                index = torch.load('index_qh9/processed_QH9Stable_random_12.pt')
                 self.idx_train = index[0]
                 self.idx_val = index[1]
                 self.idx_test = index[2]
             if "qh9" in self.data_name.lower() and "stable_ood" in self.data_name.lower():
                 print("qh9 stable ood split")
-                index = torch.load('index/processed_QH9Stable_size_ood.pt')
+                index = torch.load('index_qh9/processed_QH9Stable_size_ood.pt')
                 self.idx_train = index[0]
                 self.idx_val = index[1]
                 self.idx_test = index[2]
             if "qh9" in self.data_name.lower() and "dynamic_mol" in self.data_name.lower():
                 print("qh9 dynamic mol split")
                 # index = torch.load('/data/datasets/QH9Dynamic_100k/processed/processed_QH9Dynamic_mol.pt')
-                index = torch.load('index/processed_QH9Dynamic_mol.pt')
+                index = torch.load('index_qh9/processed_QH9Dynamic_mol.pt')
                 self.idx_train = index[0]
                 self.idx_val = index[1]
                 self.idx_test = index[2]
             if "qh9" in self.data_name.lower() and "dynamic_geo" in self.data_name.lower():
                 print("qh9 dynamic geo split")
-                index = torch.load('index/processed_QH9Dynamic_geometry.pt')
+                index = torch.load('index_qh9/processed_QH9Dynamic_geometry.pt')
                 self.idx_train = index[0]
                 self.idx_val = index[1]
                 self.idx_test = index[2]  
