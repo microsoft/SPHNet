@@ -6,25 +6,25 @@ Welcome! This repository is the official implement of SPHNet in the ICML'25 pape
 SPHNet is an efficient and scalable equivariant network that incorporates adaptive SParsity into Hamiltonian prediction task. SPHNet employs two innovative sparse gates to selectively constrain non-critical interaction combinations, significantly reducing tensor product computations while maintaining accuracy. 
 
 
-
 # Setup environment
 ## Local environment
 By running the following command, you will create a virtual environment with all the necessary packages to run the code.
 Note that it is better to use CUDA driver more than 520, due to the requirement of the package `CUDA Toolkit 12`.
 ```bash
-# Create a model training environment.
 conda env create -n sphnet -f environment.yaml
 conda activate sphnet
 ```
 
-# Proprocess data
-First you need to proprocess the data. We support data file in lmdb and mdb format. You need to calculate the initial guess of Hamiltonian matrix and also the short range and long range edge index used in the Vectorial Node Interaction Blocks. ``src/dataset/preprocess_data.py`` is an example of converting md17 dataset into the mdb format. You can modify this file to preprocess dataset.
+# Data preparation
+Before training, you need to preprocess the data to our custom format to maximize model performance. 
 
-We also provide an example data in the ./example_data folder. You can use
+You can generate well-formed data with below command for md17 and qh9 dataset or modify this file to preprocess your own dataset. We support original data file in both lmdb and mdb format. 
+    
+```bash
+python src/dataset/preprocess_data.py --data_name md17_water --input_path /path/to/original/md17/water.lmdb --output_path /path/to/preprocessed/md17/water.lmdb
 ```
-dataset = MdbDataset(path = '/data/hami/qh9stable/data.mdb',remove_init=False)
-```
-to read the data directly. Note that when ``remove_init=True``, the ``fock`` = Hamiltonian - initial guess.
+
+We also provide an example data in the ./example_data folder, which is a small subset of qh9_stable_iid. You can skip the preprocess and set the dataset-path to ./example_data/data.lmdb to fast train and test model.
 
 # Model training
 ## Halmintonian model train on local machine

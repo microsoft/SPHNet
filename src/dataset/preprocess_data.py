@@ -5,21 +5,24 @@ You can modify the data reading part according to your data format.
 '''
 
 
-from tqdm import tqdm
+
 import torch
 import os
 import lmdb
-import pickle  
+import pickle
+import argparse
+import sys
+import numpy as np
+
+from tqdm import tqdm
 from torch_geometric.data import Data
 from torch_geometric.transforms.radius_graph import RadiusGraph
 
 from build_label import build_label
-
-import sys
-sys.path.append('..')
-import numpy as np
 from utility.pyscf import get_pyscf_obj_from_dataset
 from argparse import Namespace
+
+sys.path.append('..')
 
 chemical_symbols = ["n", "H", "He" ,"Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S", 
             "Cl", "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga",
@@ -61,12 +64,13 @@ convention_dict = {
     ),
 }
 
-'''
-The order of orbital in the Hamiltonian matrix calculated by different methods are different. 
-This function is to transform the orbital order.
-The supported transform pairs are list in above convention_dict.
-'''
+
 def matrix_transform(hamiltonian, atoms, convention='pyscf_def2svp'):
+    '''
+    The order of orbital in the Hamiltonian matrix calculated by different methods are different. 
+    This function is to transform the orbital order.
+    The supported transform pairs are list in above convention_dict.
+    '''
     conv = convention_dict[convention]
     orbitals = ''
     orbitals_order = []
@@ -102,14 +106,14 @@ def cord2xyz(atom_types, atom_cords):
         xyz += f"{atom_types[i]} {' '.join([str(j) for j in atom_cords[i]])}\n"
     return xyz
 
-'''
-This function calculate the initial guess of Hamiltonian matrix. This should be very quick.
-'''
-def cal_initH(Z, R):
 
+def cal_initH(Z, R):
+    '''
+    This function calculate the initial guess of Hamiltonian matrix. This should be very quick.
+    '''
     pos = R
     atomic_numbers = Z
-    mol, mf,factory = get_pyscf_obj_from_dataset(pos,atomic_numbers, basis='def2-svp', 
+    mol, mf, factory = get_pyscf_obj_from_dataset(pos,atomic_numbers, basis='def2-svp', 
                                                     xc='pbe', gpu=False, verbose=1)
     dm0 = mf.init_guess_by_minao()
     init_h = mf.get_fock(dm=dm0)
@@ -130,56 +134,76 @@ def create_lmdb(file_path, data):
   
     env.close()  
 
-# load dataset
-name = 'malondialdehyde'
-dataset = torch.load(f'/data/datasets/md17/{name}/processed/data.pt')
+def main():
+    parser = argparse.ArgumentParser(description="Arguments for loading dataset")
 
-if name == 'water':
-    atoms = [8, 1, 1]
-elif name == 'ethanol':
-    atoms = [6, 6, 8, 1, 1, 1, 1, 1, 1]
-elif name == 'malondialdehyde':
-    atoms = [6, 6, 6, 8, 8, 1, 1, 1, 1]
-elif name == 'uracil':
-    atoms = [6, 6, 7, 6, 7, 6, 8, 8, 1, 1, 1, 1]
-elif name == 'aspirin':
-    atoms = [6, 6, 6, 6, 6, 6, 6, 8, 8, 8, 6, 6, 8,
-                1, 1, 1, 1, 1, 1, 1, 1]
+    # Add command-line arguments
+    parser.add_argument("--data_name", type=str, required=True, help="Name of the dataset, e.g., md17, qm9")
+    parser.add_argument("--output_path", type=str, required=True, help="Path to the generated LMDB file")
+    parser.add_argument("--input_path", type=str, required=True, help="Path to the original dataset file")
 
-data = []
-total_mol = dataset[0].energy.shape[0]
-atoms_num = len(atoms)
-focks = dataset[0].hamiltonian.reshape(total_mol, dataset[0].hamiltonian.shape[-1], dataset[0].hamiltonian.shape[-1])
-for i in tqdm(range(total_mol)):
-    # calculate the initial guess and transform the Hamiltonian matrix
-    init_h = cal_initH(atoms,dataset[0].pos[i*atoms_num:(i+1)*atoms_num])
-    trans_H = matrix_transform(focks[i], atoms, convention='back2pyscf')
+    # Parse arguments
+    args = parser.parse_args()
 
-    # calculate the short range and long range edge index
-    data_lsr = Data()
-    data_lsr.num_nodes = atoms_num
-    data_lsr.pos = dataset[0].pos[i*atoms_num:(i+1)*atoms_num]
-    neighbor_finder = RadiusGraph(r = 3)
-    data_lsr = neighbor_finder(data_lsr)
-    min_nodes_foreachGroup = 3
-    build_label(data_lsr, num_labels = int(atoms_num/min_nodes_foreachGroup),method = 'kmeans')
+    # Use the arguments
+    print(f"Dataset name: {args.data_name}")
+    print(f"LMDB path: {args.output_path}")
+    print(f"Dataset path: {args.input_path}")
 
-    # save the molecula; pos, Ham, Ham_init need to be float64
-    data_dict = {  
-        "id":i,
-        "pos": np.array(dataset[0].pos[i*atoms_num:(i+1)*atoms_num]), 
-        "atoms": np.array(atoms).astype(np.int32),           
-        "edge_index": data_lsr['edge_index'], 
-        "labels": data_lsr['labels'], 
-        'num_nodes':atoms_num,
-        "Ham": np.array(trans_H),
-        "Ham_init":init_h
-    }  
-    data.append(data_dict) 
+    # load dataset
+    if args.data_name in ['water', 'ethanol', 'malondialdehyde', 'uracil', 'aspirin']:
+        name = args.data_name.split('_')[-1]
+        dataset = torch.load(args.input_path, map_location='cpu')
 
-# create mdb file
-lmdb_path = f'/data/datasets/md17/{name}/processed'  
-if not os.path.exists(lmdb_path):  
-    os.makedirs(lmdb_path)  
+        if name == 'water':
+            atoms = [8, 1, 1]
+        elif name == 'ethanol':
+            atoms = [6, 6, 8, 1, 1, 1, 1, 1, 1]
+        elif name == 'malondialdehyde':
+            atoms = [6, 6, 6, 8, 8, 1, 1, 1, 1]
+        elif name == 'uracil':
+            atoms = [6, 6, 7, 6, 7, 6, 8, 8, 1, 1, 1, 1]
+        elif name == 'aspirin':
+            atoms = [6, 6, 6, 6, 6, 6, 6, 8, 8, 8, 6, 6, 8,
+                        1, 1, 1, 1, 1, 1, 1, 1]
 
-create_lmdb(lmdb_path, data)  
+        data = []
+        total_mol = dataset[0].energy.shape[0]
+        atoms_num = len(atoms)
+        focks = dataset[0].hamiltonian.reshape(total_mol, dataset[0].hamiltonian.shape[-1], dataset[0].hamiltonian.shape[-1])
+        for i in tqdm(range(total_mol)):
+            # calculate the initial guess and transform the Hamiltonian matrix
+            init_h = cal_initH(atoms,dataset[0].pos[i*atoms_num:(i+1)*atoms_num])
+            trans_H = matrix_transform(focks[i], atoms, convention='back2pyscf')
+
+            # calculate the short range and long range edge index
+            data_lsr = Data()
+            data_lsr.num_nodes = atoms_num
+            data_lsr.pos = dataset[0].pos[i*atoms_num:(i+1)*atoms_num]
+            neighbor_finder = RadiusGraph(r = 3)
+            data_lsr = neighbor_finder(data_lsr)
+            min_nodes_foreachGroup = 3
+            build_label(data_lsr, num_labels = int(atoms_num/min_nodes_foreachGroup),method = 'kmeans')
+
+            # save the molecula; pos, Ham, Ham_init need to be float64
+            data_dict = {  
+                "id":i,
+                "pos": np.array(dataset[0].pos[i*atoms_num:(i+1)*atoms_num]), 
+                "atoms": np.array(atoms).astype(np.int32),           
+                "edge_index": data_lsr['edge_index'], 
+                "labels": data_lsr['labels'], 
+                'num_nodes':atoms_num,
+                "Ham": np.array(trans_H),
+                "Ham_init":init_h
+            }  
+            data.append(data_dict) 
+
+        # create mdb file
+        output_path = args.output_path  
+        if not os.path.exists(output_path):  
+            os.makedirs(output_path)  
+
+        create_lmdb(output_path, data) 
+
+if __name__ == "__main__":
+    main() 
