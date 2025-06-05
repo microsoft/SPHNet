@@ -11,8 +11,8 @@ debug: false
 
 wandb: # wandb configuration
   open: False
-  wandb_api_key: c77ec9804aaffba9a04e3b7b4dd389b53210ab39
-  wandb_project: MADFT-NN
+  wandb_api_key: your_wandb_api_key
+  wandb_project: your_wandb_project
   wandb_group: ""
   wandb_notes: ""
 

@@ -21,10 +21,10 @@ Before training, you need to preprocess the data to our custom format to maximiz
 You can generate well-formed data with below command for md17 and qh9 dataset or modify this file to preprocess your own dataset. We support original data file in both lmdb and mdb format. 
     
 ```bash
-python src/dataset/preprocess_data.py --data_name md17_water --input_path /path/to/original/md17/water.lmdb --output_path /path/to/preprocessed/md17/water.lmdb
+python src/dataset/preprocess_data.py --data_name qh9_dynamic_mol --input_path /path/to/original/QH9Dynamic --output_path /path/to/preprocessed/qh9/dynamic/data.mdb
 ```
 
-We also provide an example data in the ./example_data folder, which is a small subset of qh9_stable_iid. You can skip the preprocess and set the dataset-path to ./example_data/data.lmdb to fast train and test model.
+For data_name we support qh9_stable/dynamic_split (such as qh9_dynamic_mol). For input_path, set the folder path where you put the QH9Dynamic/QH9Stable folder. We also provide an example data in the ./example_data folder, which is a small subset of qh9_stable_iid. You can skip the preprocess and set the dataset-path to ./example_data/data.lmdb to fast train and test model.
 
 # Model training
 ## Halmintonian model train on local machine
