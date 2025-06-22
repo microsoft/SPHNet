@@ -11,6 +11,7 @@ import warnings
 import traceback
 import os
 from .SPHNet import SPHNet,Pair_construction_layer
+from .WANet.WANetBackbone import WANet_backbone as WANet
 
 from .lsrm.lsrm_modules import Visnorm_shared_LSRMNorm2_2branchSerial
 
@@ -38,7 +39,7 @@ def create_model(config, prior_model=None, mean=None, std=None):
     
     model_type = None
     if model_backbone_name.startswith(
-        ("SPHNet")
+        ("SPHNet", "WANet")
          ):
         model_type = "TP"
         representation_model = eval(model_backbone_name)(**model_backbone_cfg)
