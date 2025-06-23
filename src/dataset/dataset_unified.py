@@ -124,6 +124,7 @@ class MdbDataset(Dataset):
         self.open_db()
         
     def open_db(self):
+        print(self.path)
         self.envs.append(self.connect_db(self.path))
         length = self.envs[-1].begin().get("length".encode("ascii"))
         if length is not None:

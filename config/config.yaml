@@ -40,6 +40,7 @@ multi_para_group: false
 weight_decay: 0
 enable_hami: true
 enable_energy_hami_error: false # whether to calculate the occupiedenergy MAE and C similarity during validation. This is very slow.
+enable_hami_orbital_energy: false # set it to true for WALoss
 hami_train_loss: 'maemse'
 hami_val_loss: 'mae'
 ngpus: 1
@@ -68,6 +69,7 @@ save_interval: 1 #Save interval, one save per n epochs (default: 10)
 data_name: custom
 basis: "def2-svp"
 dataset_path : "example_data/data.mdb"
+index_path : "."
 
 dataset_size : 1000 #the dataset size is used. This will decide the steps of different phases"
 train_ratio: 0.8

@@ -31,12 +31,14 @@ For data_name we support qh9_stable/dynamic_split (such as qh9_dynamic_mol). For
 There are three config files that set the model and training process. The config file in config/model is the model configuration. The config file in config/schedule set the learning schedule. The config/config.yaml is the overall configuration file. Please see the comments in config/config.yaml for more details.
 1. Run the following command to train the model.
     ```bash
-     python pipelines/train.py --wandb=True --wandb-group="train" --data_name="qh9_stable_iid" --basis="def2-svp" --dataset-path="/path/to/your/data.mdb" \
+     python pipelines/train.py wandb=True wandb-group="train" data_name="qh9_stable_iid" basis="def2-svp" dataset-path="/path/to/your/data.mdb" \
     ```
+    Note: To enable WALoss, please add `enable_hami_orbital_energy=True` to the command.
+    
     Specifically, when running QH9 dataset, we support four kinds of data_name: "qh9_stable_iid","qh9_stable_ood","qh9_dynamic_mol", and "qh9_dynamic_geo". The basis should set to "def2-svp". When running PubChemQH dataset, set the data_name to "pubchem" and the basis to "def2-tzvp". In the mean time, you should modify to model config file to suit different basis and dataset (Please see the comments in config/model/sphnet.yaml for detail).
 2. Run the following command to test the model.
     ```bash
-     python pipelines/test.py --wandb=True --wandb-group="test" --data_name="qh9_stable_iid" --basis="def2-svp" --dataset-path="/path/to/your/data.mdb" \
+     python pipelines/test.py wandb=True wandb-group="test" data_name="qh9_stable_iid" basis="def2-svp" dataset_path="/path/to/your/data.mdb" 
     ```
 
 
