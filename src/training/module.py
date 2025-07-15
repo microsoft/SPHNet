@@ -112,16 +112,22 @@ class HamiltonianError(ErrorMetric):
         error_dict["loss"] = error_dict.get("loss",0)
         metric = self.metric if metric is None else metric
         
+        diag_mask = batch_data['diag_mask']
+        non_diag_mask = batch_data['non_diag_mask']
+        pred_diag = batch_data['pred_hamiltonian_diagonal_blocks']
+        pred_non_diag = batch_data['pred_hamiltonian_non_diagonal_blocks']
+        target_diag = batch_data['diag_hamiltonian']
+        target_non_diag = batch_data['non_diag_hamiltonian']
+
         if self.symmetry:
-            mask = torch.cat((batch_data['diag_mask'],batch_data['non_diag_mask'],batch_data['non_diag_mask']))
-            # predict = torch.cat((predictions['hamiltonian_diagonal_blocks'],predictions['hamiltonian_non_diagonal_blocks']*mask_l1.unsqueeze(-1).unsqueeze(-1)))
-            predict = torch.cat((batch_data['pred_hamiltonian_diagonal_blocks'],batch_data['pred_hamiltonian_non_diagonal_blocks'],batch_data['pred_hamiltonian_non_diagonal_blocks']))  # no distance norm
-            target = torch.cat((batch_data['diag_hamiltonian'],batch_data['non_diag_hamiltonian'],batch_data['non_diag_hamiltonian'])) #the label is ground truth minus initial guess
+            mask = torch.cat((diag_mask, non_diag_mask, non_diag_mask))
+            predict = torch.cat((pred_diag, pred_non_diag, pred_non_diag))
+            target = torch.cat((target_diag, target_non_diag, target_non_diag))
         else:
-            mask = torch.cat((batch_data['diag_mask'],batch_data['non_diag_mask']))
-            # predict = torch.cat((predictions['hamiltonian_diagonal_blocks'],predictions['hamiltonian_non_diagonal_blocks']*mask_l1.unsqueeze(-1).unsqueeze(-1)))
-            predict = torch.cat((batch_data['pred_hamiltonian_diagonal_blocks'],batch_data['pred_hamiltonian_non_diagonal_blocks']))  # no distance norm
-            target = torch.cat((batch_data['diag_hamiltonian'],batch_data['non_diag_hamiltonian'])) #the label is ground truth minus initial guess
+            mask = torch.cat((diag_mask, non_diag_mask))
+            predict = torch.cat((pred_diag, pred_non_diag))
+            target = torch.cat((target_diag, target_non_diag))
+
         if self.sparse:
             # target geq to sparse coeff is considered as non-zero
             sparse_mask = torch.abs(target).ge(self.sparse_coeff).float()
@@ -268,7 +274,38 @@ class EnergyHamiError(ErrorMetric):
         error_dict['energy_mae'] = torch.mean(target)
 
 
-class OrbitalEnergyError(ErrorMetric):
+class _OrbitalEnergyErrorBase(ErrorMetric):
+    @staticmethod
+    def _iterate_batch(batch_data, basis):
+        full_hami_pred = batch_data['pred_hamiltonian']
+        full_hami = batch_data['hamiltonian']
+        batch_size = batch_data['ptr'].shape[0] - 1
+
+        for i in range(batch_size):
+            start, end = batch_data['ptr'][i], batch_data['ptr'][i + 1]
+            atomic_numbers = batch_data['atomic_numbers'][start:end]
+
+            if 's1e' in batch_data:
+                overlap_matrix = torch.from_numpy(batch_data['s1e'][i]).to(full_hami_pred[i].device)
+            else:
+                pos = batch_data['pos'][start:end].detach().cpu().numpy()
+                mol, mf, factory = get_pyscf_obj_from_dataset(pos, atomic_numbers, basis=basis, gpu=True)
+                s1e = mf.get_ovlp()
+                overlap_matrix = torch.from_numpy(s1e).float().to(full_hami_pred[i].device)
+                if factory: factory.free_resources()
+
+            if 'init_fock' in batch_data:
+                init_fock = torch.from_numpy(batch_data['init_fock'][i]).to(full_hami_pred[i].device)
+                full_hami_pred_i = full_hami_pred[i] + init_fock
+                full_hami_i = full_hami[i] + init_fock
+            else:
+                full_hami_pred_i = full_hami_pred[i]
+                full_hami_i = full_hami[i]
+
+            yield atomic_numbers, overlap_matrix, full_hami_pred_i, full_hami_i, full_hami[i], full_hami_pred[i]
+
+
+class OrbitalEnergyError(_OrbitalEnergyErrorBase):
     def __init__(self, loss_weight, trainer = None, metric="mae", 
                 basis="def2-svp", transform_h=False, ed_type = 'naive', pi_iter = 19, orbital_matrix_gt=False):
         super().__init__(loss_weight)
@@ -290,535 +327,9 @@ class OrbitalEnergyError(ErrorMetric):
             raise NotImplementedError()
 
         self.loss_type = trainer.hparams.enable_hami_orbital_energy
-    
-        # >>> A = torch.randn(2, 2, dtype=torch.complex128)
-        # >>> A = A + A.T.conj()  # creates a Hermitian matrix
-        # >>> A
-        # tensor([[2.9228+0.0000j, 0.2029-0.0862j],
-        #         [0.2029+0.0862j, 0.3464+0.0000j]], dtype=torch.complex128)
-        # >>> L, Q = torch.linalg.eigh(A)
-        # >>> L
-        # tensor([0.3277, 2.9415], dtype=torch.float64)
-        # >>> Q
-        # tensor([[-0.0846+-0.0000j, -0.9964+0.0000j],
-        #         [ 0.9170+0.3898j, -0.0779-0.0331j]], dtype=torch.complex128)
-        # >>> torch.dist(Q @ torch.diag(L.cdouble()) @ Q.T.conj(), A)
-        # tensor(6.1062e-16, dtype=torch.float64)
 
-        # >>> A = torch.randn(3, 2, 2, dtype=torch.float64)
-        # >>> A = A + A.mT  # creates a batch of symmetric matrices
-        # >>> L, Q = torch.linalg.eigh(A)
-        # >>> torch.dist(Q @ torch.diag_embed(L) @ Q.mH, A)
     @staticmethod
     def eigen_solver(full_hamiltonian, overlap_matrix, atoms, ed_layer=torch.linalg.eigh, ed_type="naive", eng_threshold = 1e-8):
-        eig_success = True
-        degenerate_eigenvals = False
-        # try:
-        # eigvals, eigvecs = torch.linalg.eigh(overlap_matrix)
-        n_eigens = overlap_matrix.shape[-1]
-        if ed_type == 'power_iteration':
-            eigvals, eigvecs = ed_layer(overlap_matrix, n_eigens, reverse=True)
-        else:
-            eigvals, eigvecs = ed_layer(overlap_matrix)
-        eps = eng_threshold * torch.ones_like(eigvals)
-        eigvals = torch.where(eigvals > eng_threshold, eigvals, eps)
-        frac_overlap = eigvecs / torch.sqrt(eigvals).unsqueeze(-2)
-
-        Fs = torch.bmm(torch.bmm(frac_overlap.transpose(-1, -2), full_hamiltonian), frac_overlap)
-        num_orb = sum(atoms) // 2
-        # orbital_energies, orbital_coefficients = torch.linalg.eigh(Fs)
-        if ed_type == 'power_iteration':
-            orbital_energies, orbital_coefficients = ed_layer(Fs, num_orb, reverse=False)
-        elif ed_type == 'trunc':
-            orbital_energies, orbital_coefficients = ed_layer(Fs, 1, num_orb)
-        else:
-            orbital_energies, orbital_coefficients = ed_layer(Fs)
-
-        _, counts = torch.unique_consecutive(orbital_energies, return_counts=True)
-        if torch.any(counts>1): #will give NaNs in backward pass
-            degenerate_eigenvals = True #will give NaNs in backward pass
-        orbital_coefficients = torch.bmm(frac_overlap, orbital_coefficients)
-        # except RuntimeError: #catch convergence issues with symeig
-        #     eig_success = False
-        #     orbital_energies = None
-        #     orbital_coefficients = None
-        
-        return eig_success, degenerate_eigenvals, orbital_energies, orbital_coefficients,frac_overlap
-
-
-    def cal_loss(self, batch_data, error_dict = {}, metric = None):
-        self.trainer.model.hami_model.build_final_matrix(batch_data) # construct full_hamiltonian
-        if self.loss_type != 33:
-            self.cal_homolumo_occupied(batch_data, error_dict, metric)
-        if self.loss_type in [1,2,3]:
-            return self.cal_loss_winit(batch_data, error_dict, metric)
-        elif self.loss_type == 5:
-            return self.cal_loss_woinit(batch_data, error_dict, metric)
-        elif self.loss_type == 15:
-            return self.cal_loss_ws_woinit15(batch_data, error_dict, metric)
-        elif self.loss_type in [20,21,22]:
-            return self.cal_loss_ws_woinit20(batch_data, error_dict, metric)
-    
-    def cal_homolumo_occupied(self, batch_data, error_dict = {}, metric = None):
-        error_dict["loss"] = error_dict.get("loss",0)
-        metric = self.metric if metric is None else metric
-        self.metric = metric
-
-        batch_size = batch_data['energy'].shape[0]
-        full_hami_pred = batch_data['pred_hamiltonian']
-        full_hami = batch_data['hamiltonian']
-        error1,error2,error3=[],[],[]
-        error4,error5,error6=[],[],[]
-        for i in range(batch_size):
-            start , end = batch_data['ptr'][i],batch_data['ptr'][i+1]
-            atomic_numbers = batch_data['atomic_numbers'][start:end]
-            number_of_electrons = (atomic_numbers).sum()
-            number_of_occ_orbitals = number_of_electrons // 2
-
-            # get the overlap matrix
-            if 's1e' in batch_data:
-                overlap_matrix = batch_data['s1e'][i] 
-                # transfer overlap_matrix to the device of full_hami
-                overlap_matrix = torch.from_numpy(overlap_matrix).to(full_hami_pred[i].device)
-            else:
-                raise ValueError("overlap matrix is not provided")
-            
-            # get the initial guess fock matrix
-            if 'init_fock'  in batch_data:
-                init_fock = batch_data['init_fock'][i]
-                # transfer init_fock to the device of full_hami
-                init_fock = torch.from_numpy(init_fock).to(full_hami_pred[i].device)
-                full_hami_pred_i = (full_hami_pred[i] + init_fock).detach()
-                full_hami_i = (full_hami[i] + init_fock).detach()
-            else:
-                full_hami_pred_i = full_hami_pred[i].detach()
-                full_hami_i = full_hami[i].detach()
-            norb = full_hami_i.shape[-1]
-
-            # get the ground truth occupied orbital energies and calculate the loss
-            symeig_success, degenerate_eigenvalues, orbital_energies, orbital_coefficients,frac_overlap = self.eigen_solver(full_hami_i.unsqueeze(0),
-                                                                                                                overlap_matrix.unsqueeze(0),
-                                                                                                                atomic_numbers,
-                                                                                                                self.ed_layer,
-                                                                                                                self.ed_type)
-            
-            # get the ground truth occupied orbital energies and calculate the loss
-            _, _, orbital_energies_pred, orbital_coefficients_pred,_ = self.eigen_solver(full_hami_pred_i.unsqueeze(0),
-                                                                                                                overlap_matrix.unsqueeze(0),
-                                                                                                                atomic_numbers,
-                                                                                                                self.ed_layer,
-                                                                                                                self.ed_type)
-                
-            e = orbital_energies.squeeze(0)
-            e_NN = orbital_energies_pred.squeeze(0)
-            homo_error = torch.mean(torch.abs(e[number_of_occ_orbitals-1] - e_NN[number_of_occ_orbitals-1]))
-            lumo_error = torch.mean(torch.abs(e[number_of_occ_orbitals] - e_NN[number_of_occ_orbitals]))
-            gap_error = torch.mean(torch.abs(e[number_of_occ_orbitals-1]-e[number_of_occ_orbitals]-e_NN[number_of_occ_orbitals-1]+e_NN[number_of_occ_orbitals]))
-            occ_error =  torch.mean(torch.abs(e[:number_of_occ_orbitals] - e_NN[:number_of_occ_orbitals]))
-            orb_error = torch.mean(torch.abs(e - e_NN))
-            correlation = torch.cosine_similarity(orbital_coefficients[..., :number_of_occ_orbitals], 
-                                            orbital_coefficients_pred[..., :number_of_occ_orbitals], 
-                                            dim=1).abs().mean()
-            error1.append(homo_error)
-            error2.append(lumo_error)
-            error3.append(gap_error)
-            error4.append(occ_error)
-            error5.append(orb_error)
-            error6.append(correlation)
-        error_dict[f'homo_err_kcalmol'] = HATREE_TO_KCAL*torch.mean(torch.stack(error1))
-        error_dict[f'lumo_err_kcalmol'] = HATREE_TO_KCAL*torch.mean(torch.stack(error2))
-        error_dict[f'homolumogap_err_kcalmol'] = HATREE_TO_KCAL*torch.mean(torch.stack(error3))
-        
-        error_dict[f'occ_err_kcalmol'] = HATREE_TO_KCAL*torch.mean(torch.stack(error4))
-        error_dict[f'orb_err_kcalmol'] = HATREE_TO_KCAL*torch.mean(torch.stack(error5))
-        error_dict[f'cos_sim_eigenvec'] = torch.mean(torch.stack(error6))
-        
-            
-    def cal_loss_ws_woinit20(self, batch_data, error_dict = {}, metric = None):
-        error_dict["loss"] = error_dict.get("loss",0)
-        metric = self.metric if metric is None else metric
-        self.metric = metric
-
-        batch_size = batch_data['energy'].shape[0]
-        full_hami_pred = batch_data['pred_hamiltonian']
-        full_hami = batch_data['hamiltonian']
-        loss_aggregated = []
-        loss_aggregated2 = []
-        loss_aggregated3 = []
-        for i in range(batch_size):
-            start , end = batch_data['ptr'][i],batch_data['ptr'][i+1]
-            atomic_numbers = batch_data['atomic_numbers'][start:end]
-            number_of_electrons = (atomic_numbers).sum()
-            number_of_occ_orbitals = number_of_electrons // 2
-            # get the initial guess fock matrix
-            # get the overlap matrix
-            if 's1e' in batch_data:
-                overlap_matrix = batch_data['s1e'][i] 
-                # transfer overlap_matrix to the device of full_hami
-                overlap_matrix = torch.from_numpy(overlap_matrix).to(full_hami_pred[i].device)
-            else:
-                pos = batch_data['pos'][start:end].detach().cpu().numpy()
-                mol, mf,factory = get_pyscf_obj_from_dataset(pos,atomic_numbers, basis=self.basis, gpu=True)
-                s1e = mf.get_ovlp()
-                overlap_matrix = torch.from_numpy(s1e).float().to(full_hami_pred[i].device)
-                # raise ValueError("overlap matrix is not provided")
-            
-            
-            if 'init_fock'  in batch_data:
-                init_fock = batch_data['init_fock'][i]
-                # transfer init_fock to the device of full_hami
-                init_fock = torch.from_numpy(init_fock).to(full_hami_pred[i].device)
-                            
-                # get the full hamiltonian by adding the initial guess
-                full_hami_pred_i = full_hami_pred[i] + init_fock
-                full_hami_i = full_hami[i] + init_fock
-            else:
-                # get the full hamiltonian by adding the initial guess
-                full_hami_pred_i = full_hami_pred[i]
-                full_hami_i = full_hami[i]
-                
-            norb = full_hami_i.shape[-1]
-
-            # get the ground truth occupied orbital energies and calculate the loss
-            symeig_success, degenerate_eigenvalues, orbital_energies, orbital_coefficients,frac_overlap = self.eigen_solver(full_hami_i.unsqueeze(0),
-                                                                                                                overlap_matrix.unsqueeze(0),
-                                                                                                                atomic_numbers,
-                                                                                                                self.ed_layer,
-                                                                                                                self.ed_type)
-            
-
-
-            w1 = 627    
-            e_fockdelta = (w1*orbital_coefficients.permute(0,2,1)@full_hami[i].unsqueeze(0)@(orbital_coefficients))
-            e_NN_fockdelta = (w1*orbital_coefficients.permute(0,2,1)@full_hami_pred[i].unsqueeze(0)@(orbital_coefficients))
-            # weight = 10
-            # e_fockdelta[:, number_of_occ_orbitals] *= weight
-            # e_NN_fockdelta[:, number_of_occ_orbitals] *= weight
-
-            # e_fockdelta[:, number_of_occ_orbitals, :] *= weight
-            # e_fockdelta[:, :, number_of_occ_orbitals] *= weight
-            # e_NN_fockdelta[:, number_of_occ_orbitals, :] *= weight
-            # e_NN_fockdelta[:, :, number_of_occ_orbitals] *= weight
-
-            # e_fockdelta[:, :, number_of_occ_orbitals-1] *= weight
-            # e_fockdelta[:, number_of_occ_orbitals-1, :] *= weight
-            # e_NN_fockdelta[:, :, number_of_occ_orbitals-1] *= weight
-            # e_NN_fockdelta[:, number_of_occ_orbitals-1, :] *= weight
-            
-            # get the ground truth occupied orbital energies and calculate the loss
-            flag1 = symeig_success and (not degenerate_eigenvalues)
-            flag = flag1
-
-            diff = (e_fockdelta-e_NN_fockdelta)[:,torch.eye(norb)==1] if flag else torch.zeros_like(orbital_energies)
-            diff2 = (e_fockdelta-e_NN_fockdelta)[:,(1-torch.eye(norb))==1] if flag else torch.zeros_like(orbital_energies)
-            if random.random()>0.95 and self.trainer.local_rank==0:     
-                print("e_fockdelta energy , pred, diff:",e_fockdelta[:,torch.eye(norb)==1],
-                                                        e_NN_fockdelta[:,torch.eye(norb)==1],
-                                                        diff)
-            loss = self.get_loss_from_diff(diff,metric)
-            loss2 = self.get_loss_from_diff(diff2,metric)
-            
-            
-
-            
-            loss_aggregated.append(loss)
-            loss_aggregated2.append(loss2)
-            eigenvec_loss = self.get_loss_from_diff(
-                100*(full_hami[i].unsqueeze(0)@(orbital_coefficients)-full_hami_pred[i].unsqueeze(0)@(orbital_coefficients)),
-                metric)
-            loss_aggregated3.append(eigenvec_loss)
-        
-        loss_aggregated = torch.stack(loss_aggregated).mean()
-        loss_aggregated2 = torch.stack(loss_aggregated2).mean()
-        loss_aggregated3 = torch.stack(loss_aggregated3).mean()
-        
-        error_dict[f'e_NN_diag_{self.metric}'] = loss.detach()
-        error_dict[f'e_NN_nondiag_{self.metric}'] = loss2.detach()
-        error_dict[f'e_NN_eigenvec_{self.metric}'] = eigenvec_loss.detach()
-        if self.loss_type == 20:
-            loss = loss_aggregated+loss_aggregated2
-        if self.loss_type == 21:
-            loss = loss_aggregated3
-        if self.loss_type == 22:
-            loss = loss_aggregated+loss_aggregated2 + loss_aggregated3
-
-
-
-        error_dict[f'loss'] += loss*self.loss_weight
-        return error_dict
-    
-    def cal_loss_ws_woinit15(self, batch_data, error_dict = {}, metric = None):
-        error_dict["loss"] = error_dict.get("loss",0)
-        metric = self.metric if metric is None else metric
-        self.metric = metric
-
-        batch_size = batch_data['energy'].shape[0]
-        full_hami_pred = batch_data['pred_hamiltonian']
-        full_hami = batch_data['hamiltonian']
-        loss_aggregated = []
-        loss_aggregated2 = []
-        for i in range(batch_size):
-            start , end = batch_data['ptr'][i],batch_data['ptr'][i+1]
-            atomic_numbers = batch_data['atomic_numbers'][start:end]
-            number_of_electrons = (atomic_numbers).sum()
-            number_of_occ_orbitals = number_of_electrons // 2
-            # get the initial guess fock matrix
-            if 'init_fock'  in batch_data:
-                init_fock = batch_data['init_fock'][i]
-                # transfer init_fock to the device of full_hami
-                init_fock = torch.from_numpy(init_fock).to(full_hami_pred[i].device)
-            else:
-                init_fock = torch.zeros_like(full_hami_pred[i])
-            # get the overlap matrix
-            if 's1e' in batch_data:
-                overlap_matrix = batch_data['s1e'][i] 
-                # transfer overlap_matrix to the device of full_hami
-                overlap_matrix = torch.from_numpy(overlap_matrix).to(full_hami_pred[i].device)
-            else:
-                pos = batch_data['pos'][start:end].detach().cpu().numpy()
-                mol, mf,factory = get_pyscf_obj_from_dataset(pos,atomic_numbers, basis=self.basis, gpu=True)
-                s1e = mf.get_ovlp()
-                overlap_matrix = torch.from_numpy(s1e).float().to(full_hami_pred[i].device)
-                # raise ValueError("overlap matrix is not provided")
-            # get the full hamiltonian by adding the initial guess
-            full_hami_pred_i = full_hami_pred[i] # + init_fock
-            full_hami_i = full_hami[i] # + init_fock
-            norb = full_hami_i.shape[-1]
-
-            # get the ground truth occupied orbital energies and calculate the loss
-            symeig_success, degenerate_eigenvalues, orbital_energies, orbital_coefficients, frac_overlap = self.eigen_solver(full_hami_i.unsqueeze(0),
-                                                                                                                overlap_matrix.unsqueeze(0),
-                                                                                                                atomic_numbers,
-                                                                                                                self.ed_layer,
-                                                                                                                self.ed_type)
-            
-
-                
-            # Fs_NN = torch.bmm(torch.bmm(frac_overlap.transpose(-1, -2), full_hami_pred_i.unsqueeze(0)), frac_overlap)
-            e_NN = orbital_coefficients.permute(0,2,1)@full_hami_pred_i.unsqueeze(0)@orbital_coefficients
-
-            
-            
-            # orbital energy shape is 1*orb, orbital_coefficients shape is 1*orb*orb
-            # take only the occupied orbitals
-            orbital_energies = orbital_energies #[:,:number_of_occ_orbitals]
-            orbital_energies_pred = e_NN[:,torch.eye(norb)==1] #[:,:number_of_occ_orbitals]
-
-            # get the ground truth occupied orbital energies and calculate the loss
-            flag1 = symeig_success and (not degenerate_eigenvalues)
-            flag = flag1
-
-            diff = orbital_energies - orbital_energies_pred if flag else torch.zeros_like(orbital_energies)
-            diff2 = e_NN[:,(1-torch.eye(norb))==1]
-            if random.random()>0.95 and self.trainer.local_rank==0:     
-                print("orb energy , pred, diff:",orbital_energies,orbital_energies_pred,diff)
-            loss = self.get_loss_from_diff(diff,metric)
-            loss2 = self.get_loss_from_diff(diff2,metric)
-
-            loss_aggregated.append(loss)
-            loss_aggregated2.append(loss2)
-            
-        loss_aggregated = torch.stack(loss_aggregated).mean()
-        loss_aggregated2 = torch.stack(loss_aggregated2).mean()
-        error_dict[f'e_NN_diag_{self.metric}'] = loss.detach()
-        error_dict[f'e_NN_nondiag_{self.metric}'] = loss2.detach()
-
-        loss = loss_aggregated+loss_aggregated2
-        error_dict[f'loss'] += loss*self.loss_weight
-        return error_dict
-    
-
-    def cal_loss_winit(self, batch_data, error_dict = {}, metric = None):
-        error_dict["loss"] = error_dict.get("loss",0)
-        metric = self.metric if metric is None else metric
-        self.metric = metric
-
-        batch_size = batch_data['energy'].shape[0]
-        full_hami_pred = batch_data['pred_hamiltonian']
-        full_hami = batch_data['hamiltonian']
-        loss_aggregated = []
-        loss_aggregated2 = []
-        for i in range(batch_size):
-            start , end = batch_data['ptr'][i],batch_data['ptr'][i+1]
-            atomic_numbers = batch_data['atomic_numbers'][start:end]
-            number_of_electrons = (atomic_numbers).sum()
-            number_of_occ_orbitals = number_of_electrons // 2
-            # get the initial guess fock matrix
-            if 'init_fock'  in batch_data:
-                init_fock = batch_data['init_fock'][i]
-                # transfer init_fock to the device of full_hami
-                init_fock = torch.from_numpy(init_fock).to(full_hami_pred[i].device)
-            else:
-                init_fock = torch.zeros_like(full_hami_pred[i])
-            # get the overlap matrix
-            if 's1e' in batch_data:
-                overlap_matrix = batch_data['s1e'][i] 
-                # transfer overlap_matrix to the device of full_hami
-                overlap_matrix = torch.from_numpy(overlap_matrix).to(full_hami_pred[i].device)
-            else:
-                pos = batch_data['pos'][start:end].detach().cpu().numpy()
-                mol, mf,factory = get_pyscf_obj_from_dataset(pos,atomic_numbers, basis=self.basis, gpu=True)
-                s1e = mf.get_ovlp()
-                overlap_matrix = torch.from_numpy(s1e).float().to(full_hami_pred[i].device)
-                # raise ValueError("overlap matrix is not provided")
-            # get the full hamiltonian by adding the initial guess
-            full_hami_pred_i = full_hami_pred[i]  + init_fock
-            full_hami_i = full_hami[i]  + init_fock
-            norb = full_hami_i.shape[-1]
-
-            # get the ground truth occupied orbital energies and calculate the loss
-            symeig_success, degenerate_eigenvalues, orbital_energies, orbital_coefficients,frac_overlap = self.eigen_solver(full_hami_i.unsqueeze(0),
-                                                                                                                overlap_matrix.unsqueeze(0),
-                                                                                                                atomic_numbers,
-                                                                                                                self.ed_layer,
-                                                                                                                self.ed_type)
-            
-
-                
-            # Fs_NN = torch.bmm(torch.bmm(frac_overlap.transpose(-1, -2), full_hami_pred_i.unsqueeze(0)), frac_overlap)
-            e_NN = orbital_coefficients.permute(0,2,1)@full_hami_pred_i.unsqueeze(0)@orbital_coefficients
-
-            # get the ground truth occupied orbital energies and calculate the loss
-            flag1 = symeig_success and (not degenerate_eigenvalues)
-            flag = flag1
-            orbital_energies_pred,diff,diff2,loss,loss2 = None,None,None,None,None,None
-            if self.loss_type == 1:
-                # orbital energy shape is 1*orb, orbital_coefficients shape is 1*orb*orb
-                # take only the occupied orbitals
-                orbital_energies = orbital_energies #[:,:number_of_occ_orbitals]
-                orbital_energies_pred = e_NN[:,torch.eye(norb)==1] #[:,:number_of_occ_orbitals]
-
-                diff = orbital_energies - orbital_energies_pred if flag else torch.zeros_like(orbital_energies)
-                diff2 = e_NN[:,(1-torch.eye(norb))==1]
-                loss = self.get_loss_from_diff(diff,metric)
-                loss2 = self.get_loss_from_diff(diff2,metric)
-            elif self.loss_type == 2:
-                # orbital energy shape is 1*orb, orbital_coefficients shape is 1*orb*orb
-                # take only the occupied orbitals
-                orbital_energies = orbital_energies
-                orbital_energies_pred = orbital_energies_pred[:,torch.eye(norb)==1]
-
-
-                diff = (orbital_energies - orbital_energies_pred[:,torch.eye(norb)==1])[:,:number_of_occ_orbitals] if flag else torch.zeros_like(orbital_energies)
-                diff2 = e_NN[:,:number_of_occ_orbitals,:number_of_occ_orbitals][:,(1-torch.eye(number_of_occ_orbitals))==1]
-                loss = self.get_loss_from_diff(diff,metric)
-                loss2 = self.get_loss_from_diff(diff2,metric)
-            elif self.loss_type == 3:
-                # orbital energy shape is 1*orb, orbital_coefficients shape is 1*orb*orb
-                # take only the occupied orbitals
-                orbital_energies = orbital_energies
-                orbital_energies_pred = e_NN[:,torch.eye(norb)==1]
-
-
-                diff = orbital_energies - orbital_energies_pred if flag else torch.zeros_like(orbital_energies)
-
-                loss = 0.1*self.get_loss_from_diff(diff,metric) + \
-                        0.9*self.get_loss_from_diff(diff[:,:number_of_occ_orbitals],metric)
-                loss2 = 0.1*self.get_loss_from_diff(e_NN[:,(1-torch.eye(norb))==1],metric) + \
-                        0.9*self.get_loss_from_diff(e_NN[:,:number_of_occ_orbitals,:number_of_occ_orbitals][:,(1-torch.eye(number_of_occ_orbitals))==1],metric)
-
-                
-            if random.random()>0.95 and self.trainer.local_rank==0:     
-                print("orb energy , pred, diff:",orbital_energies,orbital_energies_pred,diff)
-
-
-            loss_aggregated.append(loss)
-            loss_aggregated2.append(loss2)
-            
-        loss_aggregated = torch.stack(loss_aggregated).mean()
-        loss_aggregated2 = torch.stack(loss_aggregated2).mean()
-        error_dict[f'e_NN_diag_{self.metric}'] = loss.detach()
-        error_dict[f'e_NN_nondiag_{self.metric}'] = loss2.detach()
-
-        loss = loss_aggregated+loss_aggregated2
-        error_dict[f'loss'] += loss*self.loss_weight
-        return error_dict
-    
-
-    def cal_loss_woinit(self, batch_data, error_dict = {}, metric = None):
-        error_dict["loss"] = error_dict.get("loss",0)
-        metric = self.metric if metric is None else metric
-        self.metric = metric
-
-        batch_size = batch_data['energy'].shape[0]
-        full_hami_pred = batch_data['pred_hamiltonian']
-        full_hami = batch_data['hamiltonian']
-        loss_aggregated = []
-        loss_aggregated2 = []
-        for i in range(batch_size):
-            start , end = batch_data['ptr'][i],batch_data['ptr'][i+1]
-            atomic_numbers = batch_data['atomic_numbers'][start:end]
-            number_of_electrons = (atomic_numbers).sum()
-            number_of_occ_orbitals = number_of_electrons // 2
-            
-            # get the full hamiltonian by adding the initial guess
-            full_hami_pred_i = full_hami_pred[i] #/HATREE_TO_KCAL # + init_fock/HATREE_TO_KCAL
-            full_hami_i = full_hami[i] #/HATREE_TO_KCAL # + init_fock/HATREE_TO_KCAL
-            norb = full_hami_i.shape[-1]
-
-            
-            if self.ed_type == 'power_iteration':
-                orbital_energies, orbital_coefficients = self.ed_layer(full_hami_i.unsqueeze(0), norb, reverse=False)
-            elif self.ed_type == 'trunc':
-                orbital_energies, orbital_coefficients = self.ed_layer(full_hami_i.unsqueeze(0), 1, norb)
-            else:
-                orbital_energies, orbital_coefficients = self.ed_layer(full_hami_i.unsqueeze(0))
-                
-                
-            # Fs_NN = torch.bmm(torch.bmm(frac_overlap.transpose(-1, -2), full_hami_pred_i.unsqueeze(0)), frac_overlap)
-            e_NN = orbital_coefficients.permute(0,2,1)@full_hami_pred_i.unsqueeze(0)@orbital_coefficients
-
-            
-            
-            # orbital energy shape is 1*orb, orbital_coefficients shape is 1*orb*orb
-            # take only the occupied orbitals
-            orbital_energies = orbital_energies #[:,:number_of_occ_orbitals]
-            orbital_energies_pred = e_NN[:,torch.eye(norb)==1] #[:,:number_of_occ_orbitals]
-
-            # get the ground truth occupied orbital energies and calculate the loss
-            flag1 = True #symeig_success and (not degenerate_eigenvalues)
-            flag = flag1
-
-            diff = orbital_energies - orbital_energies_pred if flag else torch.zeros_like(orbital_energies)
-            diff2 = e_NN[:,(1-torch.eye(norb))==1]
-            if random.random()>0.95 and self.trainer.local_rank==0:     
-                print("orb energy , pred, diff:",orbital_energies,orbital_energies_pred,diff)
-            loss = self.get_loss_from_diff(diff,metric)
-            loss2 = self.get_loss_from_diff(diff2,metric)
-
-            loss_aggregated.append(loss)
-            loss_aggregated2.append(loss2)
-            
-        loss_aggregated = torch.stack(loss_aggregated).mean()
-        loss_aggregated2 = torch.stack(loss_aggregated2).mean()
-        error_dict[f'e_NN_diag_{self.metric}'] = loss.detach()
-        error_dict[f'e_NN_nondiag_{self.metric}'] = loss2.detach()
-
-        loss = loss_aggregated+loss_aggregated2
-        error_dict[f'loss'] += loss*self.loss_weight
-        return error_dict
-
-class OrbitalEnergyErrorV2(ErrorMetric):
-    def __init__(self, loss_weight, trainer = None, metric="mae", basis="def2-svp", transform_h=False, ed_type = 'naive', pi_iter = 19):
-        super().__init__(loss_weight)
-        self.trainer = trainer
-        self.metric = metric
-        self.loss_weight = loss_weight
-        self.name = "orbital_energy_loss"
-        self.basis = basis
-        self.transform_h = transform_h
-        self.ed_type = ed_type
-        if ed_type == 'naive':
-            self.ed_layer = torch.linalg.eigh
-        elif ed_type == 'trunc':
-            self.ed_layer = ED_trunc.apply
-        elif ed_type == 'power_iteration':
-            self.ed_layer = partial(ED_PI_Layer, pi_iter=pi_iter)
-        else:
-            raise NotImplementedError()
-    
-
-    def eigen_solver(self, full_hamiltonian, overlap_matrix, atoms, ed_layer, ed_type, eng_threshold = 1e-8):
         eig_success = True
         degenerate_eigenvals = False
         try:
@@ -848,60 +359,149 @@ class OrbitalEnergyErrorV2(ErrorMetric):
             orbital_coefficients = torch.bmm(frac_overlap, orbital_coefficients)
         except RuntimeError: #catch convergence issues with symeig
             eig_success = False
+            degenerate_eigenvals = True 
             orbital_energies = None
             orbital_coefficients = None
         
         return eig_success, degenerate_eigenvals, orbital_energies, orbital_coefficients
 
 
+    def cal_loss(self, batch_data, error_dict={}, metric=None):
+        self.trainer.model.hami_model.build_final_matrix(batch_data)
+
+        error_dict["loss"] = error_dict.get("loss", 0)
+        metric = self.metric if metric is None else metric
+        self.metric = metric
+
+        homo_errors, lumo_errors, gap_errors, occ_errors, orb_errors, correlations = [], [], [], [], [], []
+        diag_losses, nondiag_losses, eigenvec_losses = [], [], []
+
+        batch_iterator = self._iterate_batch(batch_data, self.basis)
+        for atomic_numbers, overlap_matrix, full_hami_pred_i, full_hami_i, hami_delta, hami_pred_delta in batch_iterator:
+            number_of_electrons = atomic_numbers.sum()
+            number_of_occ_orbitals = number_of_electrons // 2
+            norb = full_hami_i.shape[-1]
+
+            # Ground truth eigen solution
+            symeig_success, _, orbital_energies, orbital_coefficients = self.eigen_solver(
+                full_hami_i.detach().unsqueeze(0), overlap_matrix.unsqueeze(0), atomic_numbers, self.ed_layer, self.ed_type
+            )
+            
+            # Predicted eigen solution
+            _, _, orbital_energies_pred, orbital_coefficients_pred = self.eigen_solver(
+                full_hami_pred_i.detach().unsqueeze(0), overlap_matrix.unsqueeze(0), atomic_numbers, self.ed_layer, self.ed_type
+            )
+            
+            if symeig_success:
+                e = orbital_energies.squeeze(0)
+                e_NN = orbital_energies_pred.squeeze(0)
+                homo_errors.append(torch.abs(e[number_of_occ_orbitals-1] - e_NN[number_of_occ_orbitals-1]))
+                lumo_errors.append(torch.abs(e[number_of_occ_orbitals] - e_NN[number_of_occ_orbitals]))
+                gap_errors.append(torch.abs(e[number_of_occ_orbitals-1] - e[number_of_occ_orbitals] - (e_NN[number_of_occ_orbitals-1] - e_NN[number_of_occ_orbitals])))
+                occ_errors.append(torch.mean(torch.abs(e[:number_of_occ_orbitals] - e_NN[:number_of_occ_orbitals])))
+                orb_errors.append(torch.mean(torch.abs(e - e_NN)))
+                correlations.append(torch.cosine_similarity(
+                    orbital_coefficients[..., :number_of_occ_orbitals], 
+                    orbital_coefficients_pred[..., :number_of_occ_orbitals], 
+                    dim=1
+                ).abs().mean())
+
+                w1 = 627.
+                e_fockdelta = (w1 * orbital_coefficients.permute(0, 2, 1) @ hami_delta.unsqueeze(0) @ orbital_coefficients)
+                e_NN_fockdelta = (w1 * orbital_coefficients.permute(0, 2, 1) @ hami_pred_delta.unsqueeze(0) @ orbital_coefficients)
+
+                diff_diag = (e_fockdelta - e_NN_fockdelta)[:, torch.eye(norb) == 1]
+                diff_nondiag = (e_fockdelta - e_NN_fockdelta)[:, (1 - torch.eye(norb)) == 1]
+                
+                if random.random() > 0.95 and self.trainer.local_rank == 0:
+                    print("e_fockdelta energy , pred, diff:", e_fockdelta[:, torch.eye(norb) == 1],
+                          e_NN_fockdelta[:, torch.eye(norb) == 1], diff_diag)
+
+                diag_losses.append(self.get_loss_from_diff(diff_diag, metric))
+                nondiag_losses.append(self.get_loss_from_diff(diff_nondiag, metric))
+                
+                eigenvec_loss = self.get_loss_from_diff(
+                    100 * (hami_delta.unsqueeze(0) @ orbital_coefficients - hami_pred_delta.unsqueeze(0) @ orbital_coefficients),
+                    metric
+                )
+                eigenvec_losses.append(eigenvec_loss)
+
+        # Aggregate and log metrics
+        if homo_errors:
+            error_dict[f'homo_err_kcalmol'] = HATREE_TO_KCAL * torch.mean(torch.stack(homo_errors))
+            error_dict[f'lumo_err_kcalmol'] = HATREE_TO_KCAL * torch.mean(torch.stack(lumo_errors))
+            error_dict[f'homolumogap_err_kcalmol'] = HATREE_TO_KCAL * torch.mean(torch.stack(gap_errors))
+            error_dict[f'occ_err_kcalmol'] = HATREE_TO_KCAL * torch.mean(torch.stack(occ_errors))
+            error_dict[f'orb_err_kcalmol'] = HATREE_TO_KCAL * torch.mean(torch.stack(orb_errors))
+            error_dict[f'cos_sim_eigenvec'] = torch.mean(torch.stack(correlations))
+     
+        # Aggregate and compute loss
+        total_loss = 0
+        if diag_losses:
+            diag_loss = torch.stack(diag_losses).mean()
+            nondiag_loss = torch.stack(nondiag_losses).mean()
+            eigenvec_loss = torch.stack(eigenvec_losses).mean()
+
+            error_dict[f'e_NN_diag_{self.metric}'] = diag_loss.detach()
+            error_dict[f'e_NN_nondiag_{self.metric}'] = nondiag_loss.detach()
+            error_dict[f'e_NN_eigenvec_{self.metric}'] = eigenvec_loss.detach()
+
+            if self.loss_type == 20:
+                total_loss = diag_loss + nondiag_loss
+            elif self.loss_type == 21:
+                total_loss = eigenvec_loss
+            elif self.loss_type == 22:
+                total_loss = diag_loss + nondiag_loss + eigenvec_loss
+        
+        error_dict['loss'] += total_loss * self.loss_weight
+        return error_dict
+
+class OrbitalEnergyErrorV2(_OrbitalEnergyErrorBase):
+    def __init__(self, loss_weight, trainer = None, metric="mae", basis="def2-svp", transform_h=False, ed_type = 'naive', pi_iter = 19):
+        super().__init__(loss_weight)
+        self.trainer = trainer
+        self.metric = metric
+        self.loss_weight = loss_weight
+        self.name = "orbital_energy_loss"
+        self.basis = basis
+        self.transform_h = transform_h
+        self.ed_type = ed_type
+        if ed_type == 'naive':
+            self.ed_layer = torch.linalg.eigh
+        elif ed_type == 'trunc':
+            self.ed_layer = ED_trunc.apply
+        elif ed_type == 'power_iteration':
+            self.ed_layer = partial(ED_PI_Layer, pi_iter=pi_iter)
+        else:
+            raise NotImplementedError()
+    
 
     def _batch_orbital_energy_hami_loss(self, batch_data):
-        batch_size = batch_data['energy'].shape[0]
-        self.trainer.model.hami_model.build_final_matrix(batch_data) # construct full_hamiltonian
-        full_hami_pred = batch_data['pred_hamiltonian']
-        full_hami = batch_data['hamiltonian']
+        self.trainer.model.hami_model.build_final_matrix(batch_data)
+        
         loss_aggregated = []
-        for i in range(batch_size):
-            start , end = batch_data['ptr'][i],batch_data['ptr'][i+1]
-            atomic_numbers = batch_data['atomic_numbers'][start:end]
-            number_of_electrons = (atomic_numbers).sum()
-            number_of_occ_orbitals = number_of_electrons // 2
-            # get the initial guess fock matrix
-            if 'init_fock'  in batch_data:
-                init_fock = batch_data['init_fock'][i]
-                # transfer init_fock to the device of full_hami
-                init_fock = torch.from_numpy(init_fock).to(full_hami_pred[i].device)
-            # get the overlap matrix
-            if 's1e' in batch_data:
-                overlap_matrix = batch_data['s1e'][i] / HATREE_TO_KCAL
-                # transfer overlap_matrix to the device of full_hami
-                overlap_matrix = torch.from_numpy(overlap_matrix).to(full_hami_pred[i].device)
-            else:
-                raise ValueError("overlap matrix is not provided")
-            # get the full hamiltonian by adding the initial guess
-            full_hami_pred_i = full_hami_pred[i]/HATREE_TO_KCAL + init_fock/HATREE_TO_KCAL
-            full_hami_i = full_hami[i]/HATREE_TO_KCAL + init_fock/HATREE_TO_KCAL
+        batch_iterator = self._iterate_batch(batch_data, self.basis)
+        for atomic_numbers, overlap_matrix, full_hami_pred_i, full_hami_i, _, hami_pred_delta in batch_iterator:
             # solve the FC = SCe problem
-            
-            # get the ground truth occupied orbital energies and calculate the loss
-            symeig_success, degenerate_eigenvalues, orbital_energies, orbital_coefficients = self.eigen_solver(full_hami_i.unsqueeze(0),
-                                                                                                                overlap_matrix.unsqueeze(0),
-                                                                                                                atomic_numbers,
-                                                                                                                self.ed_layer,
-                                                                                                                self.ed_type)
-            pred = torch.einsum('bji, jk, bkl -> bil ', orbital_coefficients, full_hami_pred_i, orbital_coefficients)
-            # create a diagonal matrix with the orbital energies
-            diag_orbital_energies = torch.diag_embed(orbital_energies)
-            # get the ground truth occupied orbital energies and calculate the loss
-            flag = symeig_success and (not degenerate_eigenvalues)
-            diff = pred - diag_orbital_energies if flag else torch.zeros_like(diag_orbital_energies)
-            loss = self.get_loss_from_diff(diff)
-            loss_aggregated.append(loss)
-            
-        loss_aggregated = torch.stack(loss_aggregated).mean()
+            symeig_success, _, orbital_energies, orbital_coefficients = OrbitalEnergyError.eigen_solver(
+                full_hami_i.unsqueeze(0),
+                overlap_matrix.unsqueeze(0),
+                atomic_numbers,
+                self.ed_layer,
+                self.ed_type
+            )
 
-        return loss_aggregated
-    
+            if symeig_success:
+                # In V2, the predicted Hamiltonian for loss is derived from the delta
+                full_hami_pred_for_loss = hami_pred_delta / HATREE_TO_KCAL + (full_hami_i - hami_pred_delta) / HATREE_TO_KCAL
+                pred = torch.einsum('bji, jk, bkl -> bil ', orbital_coefficients, full_hami_pred_for_loss, orbital_coefficients)
+                
+                diag_orbital_energies = torch.diag_embed(orbital_energies)
+                diff = pred - diag_orbital_energies
+                loss = self.get_loss_from_diff(diff)
+                loss_aggregated.append(loss)
+            
+        return torch.stack(loss_aggregated).mean() if loss_aggregated else 0.0
 
     def get_loss_from_diff(self, diff):
         metric = self.metric 
@@ -911,10 +511,8 @@ class OrbitalEnergyErrorV2(ErrorMetric):
             loss =  torch.mean(diff**2)
         elif metric == "rmse":
             loss  = torch.sqrt(torch.mean(diff**2))
-        elif (metric == "maemse") or (metric == "msemae"):
-            mae = torch.mean(torch.abs(diff))
-            mse = torch.mean(diff**2)
-            loss =  mae+mse
+        elif metric == 'huber':
+            loss = huber_loss(diff, 0, reduction="mean", delta=1.0)
         else:
             raise ValueError(f"loss not support metric: {metric}")
         return loss
@@ -928,17 +526,6 @@ class OrbitalEnergyErrorV2(ErrorMetric):
         return error_dict
 
 
-class HomoLumoHamiError(ErrorMetric):
-    def __init__(self, loss_weight, metric="mae", basis="def2-svp", transform_h=False):
-        super().__init__(loss_weight)
-
-        self.metric = metric
-        self.loss_weight = loss_weight
-        self.name = "homo_lumo_hami_loss"
-        self.basis = basis
-        self.transform_h = transform_h
-
-    
 class LNNP(LightningModule):
     def __init__(self, hparams, mean=None, std=None):
         super(LNNP, self).__init__()
@@ -968,8 +555,8 @@ class LNNP(LightningModule):
             self.loss_func_list_train.append(HamiltonianError(self.hparams.hami_weight,self.hparams.hami_train_loss, self.hparams.sparse_loss, self.hparams.sparse_loss_coeff, self.hparams.hami_model.name))
         if self.enable_hami_orbital_energy:
             self.loss_func_list_train.append(OrbitalEnergyError(self.hparams.orbital_energy_weight,
-                 self, self.hparams.orbital_energy_train_loss, self.hparams.basis, ed_type=self.hparams.ed_type))        
-        
+                 self, self.hparams.orbital_energy_train_loss, self.hparams.basis, ed_type=self.hparams.ed_type))
+
         self.loss_func_list_val = []
         if self.enable_energy:
             self.loss_func_list_val.append(EnergyError(self.hparams.energy_weight,self.hparams.energy_val_loss))
@@ -1003,11 +590,6 @@ class LNNP(LightningModule):
                                                             "qh9" in self.hparams.data_name.lower(),
                                                             self.hparams.hami_train_loss=="scaled",
                                                             self.hparams.hami_train_loss== "normalization"))
-            # if self.hparams.test_homo_lumo_hami:
-            #     self.loss_func_list_test.append(HomoLumoHamiError(self.hparams.energy_weight,
-            #                                                       self.hparams.energy_val_loss, 
-            #                                                       self.hparams.basis, 
-            #                                                       "qh9" in self.hparams.data_name.lower()))
     
 
     def _reset_losses_dict(self,):
@@ -1053,10 +635,6 @@ class LNNP(LightningModule):
                 {'params': other_params},
                 {'params': pretrained_params, 'lr': self.hparams.lr*0.5},
                 {'params': hami_head, 'lr': self.hparams.lr*5},
-                # {'params': hami_head_0, 'lr': self.hparams.lr*10 * 0.8},
-                # {'params': hami_head_1, 'lr': self.hparams.lr*10 * 0.5},
-                # {'params': hami_head_2, 'lr': self.hparams.lr*10 * 1.2},
-                # {'params': hami_head_3, 'lr': self.hparams.lr*10 * 40},
                 {'params': hami_head_0, 'lr': self.hparams.lr*5},
                 {'params': hami_head_1, 'lr': self.hparams.lr*5},
                 {'params': hami_head_2, 'lr': self.hparams.lr*5},
@@ -1120,22 +698,8 @@ class LNNP(LightningModule):
 
             for pg in optimizer.param_groups:
                 pg["lr"] = lr_scale * self.hparams.lr
-        # # 在更新之前保存权重  
-        # original_weights = {name: param.data.clone() for name, param in self.named_parameters() if param.requires_grad}  
 
-        super().optimizer_step(*args, **kwargs)
-
-        # # 计算更新Δw，并计算Δw和原始权重W之间的比例  
-        # updates_ratios = {}  
-        # for name, param in self.named_parameters():  
-        #     if param.requires_grad:  
-        #         # Δw  
-        #         update = param.data - original_weights[name]  
-        #         # 避免除以零，添加一个小的epsilon  
-        #         epsilon = 1e-10  
-        #         # 计算比例 |Δw| / (|W| + epsilon)  
-        #         ratio = torch.abs(update) / (torch.abs(original_weights[name]) + epsilon)  
-        #         updates_ratios[name] = ratio  
+        super().optimizer_step(*args, **kwargs) 
 
         optimizer.zero_grad()
         
@@ -1152,9 +716,6 @@ class LNNP(LightningModule):
         else:
             if self.loss_func_list_val_realworld:
                 return self.step(batch_data, "val", self.loss_func_list_val_realworld)
-        
-        # # test step
-        # return self.step(batch, l1_loss, "test")
 
     def test_step(self, batch_data, batch_idx):
         return self.step(batch_data, "test", self.loss_func_list_test)

@@ -49,6 +49,7 @@ dependencies:
     - orjson
     # SPHNet
     - ase
+    - gdown
     - pyg-lib
     - --find-links https://data.pyg.org/whl/torch-2.1.0+cu121.html
     - torch-cluster==1.6.3+pt21cu121

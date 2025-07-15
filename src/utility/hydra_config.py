@@ -60,7 +60,7 @@ class Config(BaseSchema):
     enable_energy: bool = False
     enable_forces: bool = False
     enable_energy_hami_error: bool = False
-    enable_hami_orbital_energy: int = 0
+    enable_hami_orbital_energy: bool = False
     energy_weight: float = 0 #Weighting factor for energies in the loss function
     forces_weight: float = 0 #Weighting factor for forces in the loss function
     hami_weight: float = 1 #Weighting factor for hami in the loss function
@@ -87,6 +87,7 @@ class Config(BaseSchema):
     basis: str = "def2-svp"  #when predict hamitonian, the basis need to be set
     data_name: str = "QH9"
     dataset_path: Any  = None
+    index_path: Any  = None
     dataset_size: int  = -1 #the dataset size is used for debug. -1 is all data")
     train_ratio: Any = 0.8 # Percentage of samples in training set (null to use all remaining samples)
     val_ratio: Any = 0.02 # Percentage of samples in validation set (null to use all remaining samples)
@@ -106,5 +107,3 @@ class Config(BaseSchema):
     test_homo_lumo_hami: bool = False
     num_sanity_val_steps: int = 0
     check_val_every_n_epoch: int = 1
-    
-
